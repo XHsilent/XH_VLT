@@ -1,7 +1,8 @@
 // 流式解密：按 Range 请求把分块解密后返回，避免整文件进内存
 const streams = new Map();
 const cache = new Map();
-const MAX_CACHE = 3;
+const MAX_CACHE = 2;
+const MAX_SPAN = 4 * 1024 * 1024; // 单次响应最多 4 MB，避免一次解密整段
 
 self.addEventListener('install', function (e) { e.waitUntil(self.skipWaiting()); });
 self.addEventListener('activate', function (e) { e.waitUntil(self.clients.claim()); });
@@ -17,8 +18,8 @@ self.addEventListener('fetch', function (e) {
   e.respondWith(handle(e.request, u));
 });
 
-function b64(s) {
-  const bin = atob(s.replace(/\s/g, ''));
+function toBytes(b64) {
+  const bin = atob(b64.replace(/\s/g, ''));
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
@@ -29,14 +30,13 @@ async function chunkBytes(cfg, i) {
   if (cache.has(key)) return cache.get(key);
   const meta = cfg.chunks[i - 1];
   const r = await fetch('https://api.github.com/repos/' + cfg.owner + '/' + cfg.repo + '/git/blobs/' + meta.sha, {
-    headers: { Authorization: 'Bearer ' + cfg.token, Accept: 'application/vnd.github+json' }
+    headers: { Authorization: 'Bearer ' + cfg.token, Accept: 'application/vnd.github.raw' }
   });
   if (!r.ok) throw new Error('blob ' + r.status);
-  const j = await r.json();
-  const raw = b64(j.content);
-  const iv = raw.slice(0, 12);
-  const ct = raw.slice(12);
-  const k = await crypto.subtle.importKey('raw', b64(cfg.key), 'AES-GCM', false, ['decrypt']);
+  const buf = new Uint8Array(await r.arrayBuffer());
+  const iv = buf.slice(0, 12);
+  const ct = buf.slice(12);
+  const k = await crypto.subtle.importKey('raw', toBytes(cfg.key), 'AES-GCM', false, ['decrypt']);
   const aad = new TextEncoder().encode('vltc1|' + cfg.rel + '|' + i);
   const pt = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv, tagLength: 128, additionalData: aad }, k, ct));
   cache.set(key, pt);
@@ -50,7 +50,8 @@ async function handle(req, u) {
   if (!cfg) return new Response('no config', { status: 404 });
   const total = cfg.total;
   const range = req.headers.get('range');
-  let start = 0, end = total - 1;
+  let start = 0;
+  let end = total - 1;
   if (range) {
     const m = /bytes=(\d+)-(\d*)/.exec(range);
     if (m) {
@@ -58,6 +59,7 @@ async function handle(req, u) {
       end = m[2] ? Math.min(Number(m[2]), total - 1) : total - 1;
     }
   }
+  if (end - start + 1 > MAX_SPAN) end = start + MAX_SPAN - 1;
   const CH = cfg.chunkSize;
   const first = Math.floor(start / CH) + 1;
   const last = Math.floor(end / CH) + 1;
