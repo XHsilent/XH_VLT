@@ -3,8 +3,8 @@ const streams = new Map();
 const cache = new Map();
 const MAX_CACHE = 3;
 
-self.addEventListener('install', function (e) { self.skipWaiting(); });
-self.addEventListener('activate', function (e) { e.claim(); });
+self.addEventListener('install', function (e) { e.waitUntil(self.skipWaiting()); });
+self.addEventListener('activate', function (e) { e.waitUntil(self.clients.claim()); });
 
 self.addEventListener('message', function (e) {
   const d = e.data;
